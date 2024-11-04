@@ -415,6 +415,7 @@ async function main() {
           CHECKPOINT_DIR,
           KELPIE_STATE_FILE: state.filename,
           KELPIE_JOB_ID: work.id,
+          SALAD_JOB_ID: work.id
         }
       );
       /**
