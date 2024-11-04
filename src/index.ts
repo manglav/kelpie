@@ -285,7 +285,7 @@ async function main() {
       const exitCode = await commandExecutor.execute(
         work.command,
         work.arguments,
-        { ...work.environment, INPUT_DIR, OUTPUT_DIR, CHECKPOINT_DIR }
+        { ...work.environment, INPUT_DIR, OUTPUT_DIR, CHECKPOINT_DIR, SALAD_JOB_ID: work.id }
       );
       /**
        * Once the script updates, we can stop watching the directories.
