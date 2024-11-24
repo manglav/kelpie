@@ -453,10 +453,10 @@ async function main() {
           await fs.mkdir(OUTPUT_DIR, { recursive: true });
 
           /**
-           * This part is not awaited, so that the primary event loop can continue during this closing
-           * I/O driven operation.
+           * Upload and complete and wait for them to complete.
+
            */
-          uploadAndCompleteJob(work, newDir, heartbeatManager, log);
+          await uploadAndCompleteJob(work, newDir, heartbeatManager, log);
         } else if (work.sync.after && work.sync.after.length) {
           /**
            * work.sync.after is an array of upload sync blocks.
@@ -497,10 +497,9 @@ async function main() {
           }
 
           /**
-           * This part is not awaited, so that the primary event loop can continue during this closing
-           * I/O driven operation.
+           * Upload all sync configs and wait for them to complete.
            */
-          Promise.all(
+          await Promise.all(
             modifiedOutputs.map(async (syncConfig) => {
               await uploadSyncConfig(
                 work.id,
