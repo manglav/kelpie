@@ -43,6 +43,8 @@ if (
 
 const maxRetries = parseInt(MAX_RETRIES, 10);
 const maxJobFailures = parseInt(MAX_JOB_FAILURES, 10);
+const MAX_TOKEN_FAILURES = 5;
+let tokenFailures = 0;
 const imdsUrl = "http://169.254.169.254";
 
 const headers: Record<string, string> = {
@@ -327,10 +329,21 @@ async function getSaladJWT(
       3,
       log
     );
+    tokenFailures = 0;
     const { header, payload } = decodeJWT(token);
     return { token, header, payload };
   } catch (e: any) {
+    tokenFailures++;
     log.error(e.message);
+    if (tokenFailures >= MAX_TOKEN_FAILURES) {
+      log.error(
+        `Failed to fetch workload instance token after ${tokenFailures} consecutive attempts`
+      );
+      await reallocateMe(
+        `Kelpie: Token unavailable after ${tokenFailures} consecutive attempts`,
+        log
+      );
+    }
     throw new Error("Failed to get token");
   }
 }
