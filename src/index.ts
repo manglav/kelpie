@@ -207,7 +207,9 @@ async function main() {
      * The heartbeat endpoint may return a status of "canceled" if the job has been cancelled,
      * in which case we should stop the job and ask for a new one.
      */
+    let jobWasCanceled = false;
     const onJobCancel = async () => {
+      jobWasCanceled = true;
       await Promise.all(
         directoryWatchers.map((watcher) => watcher.stopWatching())
       );
@@ -435,7 +437,10 @@ async function main() {
        * If the command exits with a 0 status code, we can consider the job
        * to be successful. Otherwise, we should report the job as failed.
        */
-      if (exitCode === 0) {
+      if (jobWasCanceled) {
+        await heartbeatManager.stopHeartbeat();
+        log.info("Work was interrupted due to remote cancellation");
+      } else if (exitCode === 0) {
         log.info(`Work completed successfully on job ${work.id}`);
 
         // Sleep for a second to ensure the output files are written
