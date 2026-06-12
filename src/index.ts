@@ -1,4 +1,5 @@
 import { mkdirSync } from "fs";
+import { randomUUID } from "crypto";
 
 import {
   getWork,
@@ -35,6 +36,7 @@ import {
   decideRecreateAfterJob,
   parseRecreateEveryNJobs,
 } from "./recreatePolicy";
+import { extractJobMetadata } from "./jobMetadata";
 
 const {
   INPUT_DIR = "/input",
@@ -55,6 +57,9 @@ const {
   KELPIE_RECREATE_BETWEEN_JOBS = "false",
   KELPIE_RECREATE_EVERY_N_JOBS = "0",
   KELPIE_RECREATE_AFTER_CANCELED_JOB = "false",
+  SCREENING_WORKER_START_ID = "unknown",
+  SALAD_MACHINE_ID = "unknown",
+  SALAD_CONTAINER_GROUP_ID = "unknown",
 } = process.env;
 
 mkdirSync(INPUT_DIR, { recursive: true });
@@ -98,6 +103,14 @@ const cancelStopSequence: StopSignalStep[] = [
 ];
 
 const commandExecutor = new CommandExecutor();
+
+function workerIdentityFields() {
+  return {
+    screening_worker_start_id: SCREENING_WORKER_START_ID || "unknown",
+    machine_id: SALAD_MACHINE_ID || "unknown",
+    container_group_id: SALAD_CONTAINER_GROUP_ID || "unknown",
+  };
+}
 
 async function clearAllDirectories(dirsToClear: string[]): Promise<void> {
   await Promise.all(dirsToClear.map((dir) => purgeDirectory(dir, baseLogger)));
@@ -240,8 +253,31 @@ async function main() {
       continue;
     }
     lastWorkReceived = Date.now();
-    const log = baseLogger.child({ job_id: work.id });
-    log.info(`Received work: ${work.id}`);
+    const jobMetadata = extractJobMetadata(work);
+    const jobAttemptId = randomUUID();
+    const jobStartedAtMs = Date.now();
+    let observedExitCode: number | null = null;
+    let observedExitAction: string | null = null;
+    let observedExitError: string | null = null;
+    const log = baseLogger.child({
+      job_id: work.id,
+      kelpie_job_attempt_id: jobAttemptId,
+      run_name: jobMetadata.run_name,
+      shard: jobMetadata.shard,
+      screening_worker_start_id: SCREENING_WORKER_START_ID || "unknown",
+    });
+    log.info(
+      {
+        ...jobMetadata,
+        ...workerIdentityFields(),
+        kelpie_job_attempt_id: jobAttemptId,
+        task_container_group_id: work.container_group_id,
+        job_started_at_ms: jobStartedAtMs,
+        heartbeat_interval_s: work.heartbeat_interval,
+        max_failures: work.max_failures,
+      },
+      "kelpie_job_received"
+    );
     state.startJob(work.id, log);
     if (state.getState().isUploadingFinalArtifacts === 0) {
       await setDeletionCost(1, log);
@@ -511,10 +547,13 @@ async function main() {
           CHECKPOINT_DIR,
           KELPIE_STATE_FILE: state.filename,
           KELPIE_JOB_ID: work.id,
-          SALAD_JOB_ID: work.id
+          KELPIE_JOB_ATTEMPT_ID: jobAttemptId,
+          SCREENING_JOB_ATTEMPT_ID: jobAttemptId,
+          SALAD_JOB_ID: work.id,
         },
         log
       );
+      observedExitCode = exitCode;
       /**
        * Once the command exits, we can update the job's status in the state.
        * In the event the exitCode is null, we will default to -2, which is
@@ -535,6 +574,7 @@ async function main() {
        * to be successful. Otherwise, we should report the job as failed.
        */
       const exitDecision = decideJobExitAction(exitCode, jobWasCanceled);
+      observedExitAction = exitDecision.action;
       if (exitDecision.action === "canceled") {
         await heartbeatManager.stopHeartbeat();
         const exitedAtMs = Date.now();
@@ -658,8 +698,10 @@ async function main() {
         log.error(`Work failed with exit code ${exitCode}`);
       }
     } catch (e: any) {
+      observedExitError = e.message;
       if (/terminated due to signal/i.test(e.message)) {
         if (jobWasCanceled) {
+          observedExitAction = "canceled";
           const exitedAtMs = Date.now();
           stopCancelProgressLogging();
           log.info(
@@ -676,9 +718,11 @@ async function main() {
             "Work exited after remote cancellation"
           );
         } else {
+          observedExitAction = "interrupted";
           log.info("Work was interrupted, likely due to remote cancellation");
         }
       } else {
+        observedExitAction = "failed";
         log.error(`Error processing work: ${e.message}`);
         await reportFailed(work.id, log);
       }
@@ -694,6 +738,30 @@ async function main() {
           logger: log,
         }));
     }
+
+    const jobEndedAtMs = Date.now();
+    log.info(
+      {
+        ...jobMetadata,
+        ...workerIdentityFields(),
+        kelpie_job_attempt_id: jobAttemptId,
+        task_container_group_id: work.container_group_id,
+        job_started_at_ms: jobStartedAtMs,
+        job_ended_at_ms: jobEndedAtMs,
+        job_runtime_ms: jobEndedAtMs - jobStartedAtMs,
+        exit_code: observedExitCode,
+        exit_action: observedExitAction,
+        error: observedExitError,
+        canceled: jobWasCanceled,
+        cancel_detected_at_ms: cancelDetectedAtMs,
+        cancel_to_exit_ms:
+          cancelDetectedAtMs === null ? null : jobEndedAtMs - cancelDetectedAtMs,
+        cancel_cleanup_group_empty: cancelCleanupResult?.groupEmpty,
+        cancel_cleanup_final_signal: cancelCleanupResult?.finalSignal,
+        cancel_cleanup_elapsed_ms: cancelCleanupResult?.cleanupElapsedMs,
+      },
+      "kelpie_job_exit"
+    );
 
     /**
      * While the previous job is being finalized from temporary directories,

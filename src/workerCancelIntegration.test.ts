@@ -74,7 +74,11 @@ async function writeNestedJobScripts(runDir: string): Promise<string> {
        stdio: "ignore",
        env: process.env,
      });
-     write("parent-start.json", { child_pid: child.pid });
+     write("parent-start.json", {
+       child_pid: child.pid,
+       kelpie_job_attempt_id: process.env.KELPIE_JOB_ATTEMPT_ID || null,
+       screening_job_attempt_id: process.env.SCREENING_JOB_ATTEMPT_ID || null,
+     });
      process.on("SIGINT", () => { write("parent-sigint.json"); process.exit(130); });
      process.on("SIGTERM", () => { write("parent-sigterm.json"); process.exit(143); });
      setInterval(() => {}, 1000);
@@ -122,7 +126,15 @@ test(
             num_failures: 0,
             machine_id: "machine-1",
             command: process.execPath,
-            arguments: [parentPath],
+            arguments: [
+              parentPath,
+              "--shard-index",
+              "7527",
+              "--s3-output",
+              "s3://docking-results/runs/CHK1/registry-pocket/enamine-real-2026-01-13-6m-raw/outputs/",
+              "--work-dir",
+              "/app/data/output/work/shard_007527",
+            ],
             environment: { KELPIE_TEST_RUN_DIR: runDir },
             heartbeat_interval: 0.05,
             max_failures: 3,
@@ -191,6 +203,9 @@ test(
           KELPIE_CANCEL_PROGRESS_LOG_INTERVAL_S: "0",
           KELPIE_RECREATE_BETWEEN_JOBS: "false",
           KELPIE_RECREATE_EVERY_N_JOBS: "0",
+          SCREENING_WORKER_START_ID: "worker-start-test-1",
+          SALAD_MACHINE_ID: "machine-test-1",
+          SALAD_CONTAINER_GROUP_ID: "group-test-1",
           MAX_TIME_WITH_NO_WORK_S: "0",
         },
       });
@@ -218,6 +233,12 @@ test(
       const grandchildStart = JSON.parse(
         await waitForFile(path.join(runDir, "grandchild-start.json"))
       ) as { pid: number; pgid: number };
+      const parentStart = JSON.parse(
+        await waitForFile(path.join(runDir, "parent-start.json"))
+      ) as {
+        kelpie_job_attempt_id: string;
+        screening_job_attempt_id: string;
+      };
 
       assert.equal(exitCode, 0, `stdout=${stdout} stderr=${stderr}`);
       assert.ok(heartbeatCount > 0);
@@ -229,6 +250,21 @@ test(
       assert.match(stdout, /remote_cancellation_observed/);
       assert.match(stdout, /job_process_group_signal_sent/);
       assert.match(stdout, /container_recreate_requested/);
+      assert.match(stdout, /kelpie_job_received/);
+      assert.match(stdout, /kelpie_job_start/);
+      assert.match(stdout, /kelpie_job_exit/);
+      assert.match(
+        stdout,
+        /"run_name":"CHK1\/registry-pocket\/enamine-real-2026-01-13-6m-raw"/
+      );
+      assert.match(stdout, /"shard":7527/);
+      assert.match(stdout, /"screening_worker_start_id":"worker-start-test-1"/);
+      assert.match(stdout, /"kelpie_job_attempt_id":"[0-9a-f-]{36}"/);
+      assert.match(parentStart.kelpie_job_attempt_id, /^[0-9a-f-]{36}$/);
+      assert.equal(
+        parentStart.screening_job_attempt_id,
+        parentStart.kelpie_job_attempt_id
+      );
     } finally {
       await new Promise<void>((resolve) => server.close(() => resolve()));
       await rm(runDir, { recursive: true, force: true });

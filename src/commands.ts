@@ -188,6 +188,7 @@ export class CommandExecutor {
         { pid: running.pid, pgid: running.pgid },
         "job_process_group_started"
       );
+      logger.info({ pid: running.pid, pgid: running.pgid }, "kelpie_job_start");
 
       child.on("error", (err) => {
         logger.error(`Failed to start subprocess: ${err.message}`);
