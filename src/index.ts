@@ -39,6 +39,8 @@ const {
   // There are backend implications to this, so we aren't documenting it yet.
   HEARTBEAT_INTERVAL_S = "10",
 
+  KELPIE_CANCEL_PROGRESS_LOG_INTERVAL_S = "10",
+
   KELPIE_RECREATE_BETWEEN_JOBS = "false",
 } = process.env;
 
@@ -48,6 +50,8 @@ mkdirSync(CHECKPOINT_DIR, { recursive: true });
 
 const maxTimeWithNoWorkMs = parseInt(MAX_TIME_WITH_NO_WORK_S, 10) * 1000;
 const heartbeatIntervalMs = parseInt(HEARTBEAT_INTERVAL_S, 10) * 1000;
+const cancelProgressLogIntervalMs =
+  parseInt(KELPIE_CANCEL_PROGRESS_LOG_INTERVAL_S, 10) * 1000;
 const recreateBetweenJobs = KELPIE_RECREATE_BETWEEN_JOBS === "true";
 
 const commandExecutor = new CommandExecutor();
@@ -210,6 +214,14 @@ async function main() {
      */
     let jobWasCanceled = false;
     let cancelDetectedAtMs: number | null = null;
+    let cancelProgressTimer: NodeJS.Timeout | null = null;
+    const stopCancelProgressLogging = () => {
+      if (cancelProgressTimer) {
+        clearInterval(cancelProgressTimer);
+        cancelProgressTimer = null;
+      }
+    };
+
     const onJobCancel = async () => {
       jobWasCanceled = true;
       cancelDetectedAtMs = Date.now();
@@ -228,6 +240,24 @@ async function main() {
         },
         "Remote cancellation observed"
       );
+      stopCancelProgressLogging();
+      if (cancelProgressLogIntervalMs > 0) {
+        cancelProgressTimer = setInterval(() => {
+          const nowMs = Date.now();
+          log.warn(
+            {
+              canceled: true,
+              cancel_detected_at_ms: cancelDetectedAtMs,
+              cancel_wait_ms: nowMs - cancelDetectedAtMs!,
+              cancel_signal: interruptResult.signal,
+              cancel_signal_sent: interruptResult.sent,
+              cancel_signal_target: interruptResult.target,
+              cancel_signal_pid: interruptResult.pid,
+            },
+            "Remote cancellation still waiting for process exit"
+          );
+        }, cancelProgressLogIntervalMs);
+      }
     };
 
     const handleHeartbeatError = async (e: any) => {
@@ -455,6 +485,7 @@ async function main() {
       if (exitDecision.action === "canceled") {
         await heartbeatManager.stopHeartbeat();
         const exitedAtMs = Date.now();
+        stopCancelProgressLogging();
         log.info(
           {
             canceled: true,
@@ -577,6 +608,7 @@ async function main() {
       if (/terminated due to signal/i.test(e.message)) {
         if (jobWasCanceled) {
           const exitedAtMs = Date.now();
+          stopCancelProgressLogging();
           log.info(
             {
               canceled: true,
@@ -597,6 +629,7 @@ async function main() {
         log.error(`Error processing work: ${e.message}`);
         await reportFailed(work.id, log);
       }
+      stopCancelProgressLogging();
       await heartbeatManager.stopHeartbeat();
     }
 
