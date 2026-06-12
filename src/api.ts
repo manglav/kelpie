@@ -15,6 +15,7 @@ let {
   SALAD_ORGANIZATION_NAME,
   SALAD_MACHINE_ID = "",
   SALAD_CONTAINER_GROUP_ID = "",
+  SALAD_IMDS_URL = "http://169.254.169.254",
   MAX_RETRIES = "3",
   MAX_JOB_FAILURES = "5",
 } = process.env;
@@ -45,7 +46,7 @@ const maxRetries = parseInt(MAX_RETRIES, 10);
 const maxJobFailures = parseInt(MAX_JOB_FAILURES, 10);
 const MAX_TOKEN_FAILURES = 5;
 let tokenFailures = 0;
-const imdsUrl = "http://169.254.169.254";
+const imdsUrl = SALAD_IMDS_URL;
 
 const headers: Record<string, string> = {
   "Content-Type": "application/json",
@@ -101,7 +102,7 @@ async function getHeaders(): Promise<Record<string, string>> {
   return headers;
 }
 
-const imds = new SaladCloudImdsSdk({});
+const imds = new SaladCloudImdsSdk({ baseUrl: imdsUrl });
 
 async function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
