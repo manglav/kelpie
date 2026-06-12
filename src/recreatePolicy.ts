@@ -1,4 +1,4 @@
-export type RecreateReason = "between_jobs" | "every_n_jobs";
+export type RecreateReason = "between_jobs" | "every_n_jobs" | "canceled_job";
 
 export type RecreateDecision =
   | {
@@ -19,14 +19,22 @@ export function parseRecreateEveryNJobs(value: string): number {
 }
 
 export function decideRecreateAfterJob({
+  jobWasCanceled = false,
+  recreateAfterCanceledJob = false,
   recreateBetweenJobs,
   recreateEveryNJobs,
   jobsSinceRecreate,
 }: {
+  jobWasCanceled?: boolean;
+  recreateAfterCanceledJob?: boolean;
   recreateBetweenJobs: boolean;
   recreateEveryNJobs: number;
   jobsSinceRecreate: number;
 }): RecreateDecision {
+  if (jobWasCanceled && recreateAfterCanceledJob) {
+    return { shouldRecreate: true, reason: "canceled_job" };
+  }
+
   if (recreateBetweenJobs) {
     return { shouldRecreate: true, reason: "between_jobs" };
   }

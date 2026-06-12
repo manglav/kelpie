@@ -18,7 +18,11 @@ import {
   downloadSyncConfig,
   uploadSyncConfig,
 } from "./s3";
-import { CommandExecutor } from "./commands";
+import {
+  CommandExecutor,
+  ProcessGroupCleanupResult,
+  StopSignalStep,
+} from "./commands";
 import path from "path";
 import { version } from "../package.json";
 import fs from "fs/promises";
@@ -44,9 +48,13 @@ const {
   HEARTBEAT_INTERVAL_S = "10",
 
   KELPIE_CANCEL_PROGRESS_LOG_INTERVAL_S = "10",
+  KELPIE_CANCEL_SIGINT_GRACE_S = "15",
+  KELPIE_CANCEL_SIGTERM_GRACE_S = "15",
+  KELPIE_CANCEL_SIGKILL_GRACE_S = "3",
 
   KELPIE_RECREATE_BETWEEN_JOBS = "false",
   KELPIE_RECREATE_EVERY_N_JOBS = "0",
+  KELPIE_RECREATE_AFTER_CANCELED_JOB = "false",
 } = process.env;
 
 mkdirSync(INPUT_DIR, { recursive: true });
@@ -61,6 +69,33 @@ const recreateBetweenJobs = KELPIE_RECREATE_BETWEEN_JOBS === "true";
 const recreateEveryNJobs = parseRecreateEveryNJobs(
   KELPIE_RECREATE_EVERY_N_JOBS
 );
+const recreateAfterCanceledJob = KELPIE_RECREATE_AFTER_CANCELED_JOB === "true";
+
+function parseNonNegativeSeconds(value: string, fallbackSeconds: number): number {
+  const parsed = Number.parseFloat(value);
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    return fallbackSeconds;
+  }
+  return parsed;
+}
+
+const cancelStopSequence: StopSignalStep[] = [
+  {
+    signal: "SIGINT",
+    graceMs:
+      parseNonNegativeSeconds(KELPIE_CANCEL_SIGINT_GRACE_S, 15) * 1000,
+  },
+  {
+    signal: "SIGTERM",
+    graceMs:
+      parseNonNegativeSeconds(KELPIE_CANCEL_SIGTERM_GRACE_S, 15) * 1000,
+  },
+  {
+    signal: "SIGKILL",
+    graceMs:
+      parseNonNegativeSeconds(KELPIE_CANCEL_SIGKILL_GRACE_S, 3) * 1000,
+  },
+];
 
 const commandExecutor = new CommandExecutor();
 
@@ -223,6 +258,8 @@ async function main() {
      */
     let jobWasCanceled = false;
     let cancelDetectedAtMs: number | null = null;
+    let cancelCleanupResult: ProcessGroupCleanupResult | null = null;
+    let cancelCleanupPromise: Promise<ProcessGroupCleanupResult> | null = null;
     let cancelProgressTimer: NodeJS.Timeout | null = null;
     const stopCancelProgressLogging = () => {
       if (cancelProgressTimer) {
@@ -237,17 +274,17 @@ async function main() {
       await Promise.all(
         directoryWatchers.map((watcher) => watcher.stopWatching())
       );
-      const interruptResult = commandExecutor.interrupt();
+      const runningJob = commandExecutor.getRunningJob();
       log.info(
         {
           canceled: true,
           cancel_detected_at_ms: cancelDetectedAtMs,
-          cancel_signal: interruptResult.signal,
-          cancel_signal_sent: interruptResult.sent,
-          cancel_signal_target: interruptResult.target,
-          cancel_signal_pid: interruptResult.pid,
+          recreate_after_canceled_job: recreateAfterCanceledJob,
+          cancel_signal_target: runningJob ? "process_group" : "none",
+          cancel_signal_pid: runningJob?.pid,
+          cancel_signal_pgid: runningJob?.pgid,
         },
-        "Remote cancellation observed"
+        "remote_cancellation_observed"
       );
       stopCancelProgressLogging();
       if (cancelProgressLogIntervalMs > 0) {
@@ -258,15 +295,21 @@ async function main() {
               canceled: true,
               cancel_detected_at_ms: cancelDetectedAtMs,
               cancel_wait_ms: nowMs - cancelDetectedAtMs!,
-              cancel_signal: interruptResult.signal,
-              cancel_signal_sent: interruptResult.sent,
-              cancel_signal_target: interruptResult.target,
-              cancel_signal_pid: interruptResult.pid,
+              cancel_signal_target: runningJob ? "process_group" : "none",
+              cancel_signal_pid: runningJob?.pid,
+              cancel_signal_pgid: runningJob?.pgid,
             },
             "Remote cancellation still waiting for process exit"
           );
         }, cancelProgressLogIntervalMs);
       }
+
+      cancelCleanupPromise = commandExecutor.stopProcessGroup({
+        reason: "remote_cancel",
+        sequence: cancelStopSequence,
+        logger: log,
+      });
+      cancelCleanupResult = await cancelCleanupPromise;
     };
 
     const handleHeartbeatError = async (e: any) => {
@@ -469,7 +512,8 @@ async function main() {
           KELPIE_STATE_FILE: state.filename,
           KELPIE_JOB_ID: work.id,
           SALAD_JOB_ID: work.id
-        }
+        },
+        log
       );
       /**
        * Once the command exits, we can update the job's status in the state.
@@ -642,6 +686,15 @@ async function main() {
       await heartbeatManager.stopHeartbeat();
     }
 
+    if (jobWasCanceled && !cancelCleanupResult) {
+      cancelCleanupResult = await (cancelCleanupPromise ??
+        commandExecutor.stopProcessGroup({
+          reason: "remote_cancel_after_exit",
+          sequence: cancelStopSequence,
+          logger: log,
+        }));
+    }
+
     /**
      * While the previous job is being finalized from temporary directories,
      * we can clear the directories that were used for the job, in preparation for the next job
@@ -676,6 +729,8 @@ async function main() {
 
     jobsSinceRecreate++;
     const recreateDecision = decideRecreateAfterJob({
+      jobWasCanceled,
+      recreateAfterCanceledJob,
       recreateBetweenJobs,
       recreateEveryNJobs,
       jobsSinceRecreate,
@@ -688,13 +743,20 @@ async function main() {
           recreate_reason: recreateDecision.reason,
           jobs_since_recreate: jobsSinceRecreate,
           recreate_every_n_jobs: recreateEveryNJobs,
+          job_was_canceled: jobWasCanceled,
+          recreate_after_canceled_job: recreateAfterCanceledJob,
+          cancel_cleanup_group_empty: cancelCleanupResult?.groupEmpty,
+          cancel_cleanup_final_signal: cancelCleanupResult?.finalSignal,
+          cancel_cleanup_elapsed_ms: cancelCleanupResult?.cleanupElapsedMs,
         },
-        "Recreating container after job"
+        "container_recreate_requested"
       );
       await recreateMe(baseLogger);
       await sleep(1000); // Give some time for the container to be recreated
       break;
     }
+
+    commandExecutor.clearRunningJob();
   }
 }
 

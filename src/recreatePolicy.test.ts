@@ -30,6 +30,45 @@ test("recreate between jobs forces recreate after every job", () => {
   });
 });
 
+test("recreate after canceled job is controlled separately", () => {
+  assert.deepEqual(
+    decideRecreateAfterJob({
+      jobWasCanceled: true,
+      recreateAfterCanceledJob: false,
+      recreateBetweenJobs: false,
+      recreateEveryNJobs: 0,
+      jobsSinceRecreate: 1,
+    }),
+    { shouldRecreate: false, reason: null }
+  );
+
+  assert.deepEqual(
+    decideRecreateAfterJob({
+      jobWasCanceled: true,
+      recreateAfterCanceledJob: true,
+      recreateBetweenJobs: false,
+      recreateEveryNJobs: 0,
+      jobsSinceRecreate: 1,
+    }),
+    { shouldRecreate: true, reason: "canceled_job" }
+  );
+});
+
+test("recreate after canceled job takes precedence over routine policies", () => {
+  const decision = decideRecreateAfterJob({
+    jobWasCanceled: true,
+    recreateAfterCanceledJob: true,
+    recreateBetweenJobs: true,
+    recreateEveryNJobs: 1,
+    jobsSinceRecreate: 1,
+  });
+
+  assert.deepEqual(decision, {
+    shouldRecreate: true,
+    reason: "canceled_job",
+  });
+});
+
 test("recreate every N jobs waits until the threshold", () => {
   assert.deepEqual(
     decideRecreateAfterJob({
