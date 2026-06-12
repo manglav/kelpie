@@ -27,6 +27,10 @@ import { Logger } from "pino";
 import { SyncConfig, Task } from "./types";
 import state from "./state";
 import { decideJobExitAction } from "./jobOutcome";
+import {
+  decideRecreateAfterJob,
+  parseRecreateEveryNJobs,
+} from "./recreatePolicy";
 
 const {
   INPUT_DIR = "/input",
@@ -42,6 +46,7 @@ const {
   KELPIE_CANCEL_PROGRESS_LOG_INTERVAL_S = "10",
 
   KELPIE_RECREATE_BETWEEN_JOBS = "false",
+  KELPIE_RECREATE_EVERY_N_JOBS = "0",
 } = process.env;
 
 mkdirSync(INPUT_DIR, { recursive: true });
@@ -53,6 +58,9 @@ const heartbeatIntervalMs = parseInt(HEARTBEAT_INTERVAL_S, 10) * 1000;
 const cancelProgressLogIntervalMs =
   parseInt(KELPIE_CANCEL_PROGRESS_LOG_INTERVAL_S, 10) * 1000;
 const recreateBetweenJobs = KELPIE_RECREATE_BETWEEN_JOBS === "true";
+const recreateEveryNJobs = parseRecreateEveryNJobs(
+  KELPIE_RECREATE_EVERY_N_JOBS
+);
 
 const commandExecutor = new CommandExecutor();
 
@@ -130,6 +138,7 @@ async function main() {
   );
 
   let lastWorkReceived = Date.now();
+  let jobsSinceRecreate = 0;
   while (keepAlive) {
     let work;
     try {
@@ -665,9 +674,23 @@ async function main() {
 
     await clearAllDirectories(dirsToClear);
 
-    if (recreateBetweenJobs) {
+    jobsSinceRecreate++;
+    const recreateDecision = decideRecreateAfterJob({
+      recreateBetweenJobs,
+      recreateEveryNJobs,
+      jobsSinceRecreate,
+    });
+
+    if (recreateDecision.shouldRecreate) {
       await state.waitForUploads(work.id, baseLogger);
-      baseLogger.info("Recreating container between jobs...");
+      baseLogger.info(
+        {
+          recreate_reason: recreateDecision.reason,
+          jobs_since_recreate: jobsSinceRecreate,
+          recreate_every_n_jobs: recreateEveryNJobs,
+        },
+        "Recreating container after job"
+      );
       await recreateMe(baseLogger);
       await sleep(1000); // Give some time for the container to be recreated
       break;
