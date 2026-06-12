@@ -4,7 +4,7 @@
   "description": "A worker binary to coordinate long running jobs on salad. Works with Kelpie API",
   "main": "dist/index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1",
+    "test": "npm run build && node --test dist/*.test.js",
     "build": "tsc",
     "start": "node dist/index.js",
     "build-binary": "tsc && pkg -t node20-linux-x64 --out-path bin ."

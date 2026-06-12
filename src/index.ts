@@ -26,6 +26,7 @@ import { log as baseLogger } from "./logger";
 import { Logger } from "pino";
 import { SyncConfig, Task } from "./types";
 import state from "./state";
+import { decideJobExitAction } from "./jobOutcome";
 
 const {
   INPUT_DIR = "/input",
@@ -437,10 +438,18 @@ async function main() {
        * If the command exits with a 0 status code, we can consider the job
        * to be successful. Otherwise, we should report the job as failed.
        */
-      if (jobWasCanceled) {
+      const exitDecision = decideJobExitAction(exitCode, jobWasCanceled);
+      if (exitDecision.action === "canceled") {
         await heartbeatManager.stopHeartbeat();
-        log.info("Work was interrupted due to remote cancellation");
-      } else if (exitCode === 0) {
+        log.info(
+          {
+            canceled: true,
+            exit_code: exitDecision.exitCode,
+            report_failure: exitDecision.reportFailure,
+          },
+          "Work exited after remote cancellation"
+        );
+      } else if (exitDecision.action === "completed") {
         log.info(`Work completed successfully on job ${work.id}`);
 
         // Sleep for a second to ensure the output files are written
