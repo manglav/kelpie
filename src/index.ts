@@ -209,12 +209,25 @@ async function main() {
      * in which case we should stop the job and ask for a new one.
      */
     let jobWasCanceled = false;
+    let cancelDetectedAtMs: number | null = null;
     const onJobCancel = async () => {
       jobWasCanceled = true;
+      cancelDetectedAtMs = Date.now();
       await Promise.all(
         directoryWatchers.map((watcher) => watcher.stopWatching())
       );
-      commandExecutor.interrupt();
+      const interruptResult = commandExecutor.interrupt();
+      log.info(
+        {
+          canceled: true,
+          cancel_detected_at_ms: cancelDetectedAtMs,
+          cancel_signal: interruptResult.signal,
+          cancel_signal_sent: interruptResult.sent,
+          cancel_signal_target: interruptResult.target,
+          cancel_signal_pid: interruptResult.pid,
+        },
+        "Remote cancellation observed"
+      );
     };
 
     const handleHeartbeatError = async (e: any) => {
@@ -441,11 +454,16 @@ async function main() {
       const exitDecision = decideJobExitAction(exitCode, jobWasCanceled);
       if (exitDecision.action === "canceled") {
         await heartbeatManager.stopHeartbeat();
+        const exitedAtMs = Date.now();
         log.info(
           {
             canceled: true,
             exit_code: exitDecision.exitCode,
             report_failure: exitDecision.reportFailure,
+            cancel_detected_at_ms: cancelDetectedAtMs,
+            cancel_exited_at_ms: exitedAtMs,
+            cancel_to_exit_ms:
+              cancelDetectedAtMs === null ? null : exitedAtMs - cancelDetectedAtMs,
           },
           "Work exited after remote cancellation"
         );
@@ -558,12 +576,17 @@ async function main() {
     } catch (e: any) {
       if (/terminated due to signal/i.test(e.message)) {
         if (jobWasCanceled) {
+          const exitedAtMs = Date.now();
           log.info(
             {
               canceled: true,
               exit_code: null,
               report_failure: false,
               error: e.message,
+              cancel_detected_at_ms: cancelDetectedAtMs,
+              cancel_exited_at_ms: exitedAtMs,
+              cancel_to_exit_ms:
+                cancelDetectedAtMs === null ? null : exitedAtMs - cancelDetectedAtMs,
             },
             "Work exited after remote cancellation"
           );

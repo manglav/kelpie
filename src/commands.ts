@@ -1,6 +1,13 @@
 import { spawn, ChildProcess } from "child_process";
 import { log } from "./logger";
 
+export type InterruptResult = {
+  sent: boolean;
+  signal: NodeJS.Signals;
+  target: "process";
+  pid?: number;
+};
+
 export class CommandExecutor {
   private process: ChildProcess | null = null;
 
@@ -44,12 +51,18 @@ export class CommandExecutor {
   /**
    * Interrupts the currently running subprocess.
    */
-  interrupt(): void {
+  interrupt(signal: NodeJS.Signals = "SIGINT"): InterruptResult {
     if (this.process) {
-      this.process.kill("SIGINT"); // Sends the interrupt signal
-      log.info("Process was interrupted");
+      const pid = this.process.pid;
+      const sent = this.process.kill(signal);
+      log.info(
+        { signal, target: "process", pid, sent },
+        "Cancel signal sent"
+      );
+      return { sent, signal, target: "process", pid };
     } else {
       log.info("No process to interrupt");
+      return { sent: false, signal, target: "process" };
     }
   }
 }
