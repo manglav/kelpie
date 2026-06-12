@@ -557,7 +557,19 @@ async function main() {
       }
     } catch (e: any) {
       if (/terminated due to signal/i.test(e.message)) {
-        log.info("Work was interrupted, likely due to remote cancellation");
+        if (jobWasCanceled) {
+          log.info(
+            {
+              canceled: true,
+              exit_code: null,
+              report_failure: false,
+              error: e.message,
+            },
+            "Work exited after remote cancellation"
+          );
+        } else {
+          log.info("Work was interrupted, likely due to remote cancellation");
+        }
       } else {
         log.error(`Error processing work: ${e.message}`);
         await reportFailed(work.id, log);
