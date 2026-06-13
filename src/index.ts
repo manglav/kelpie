@@ -293,6 +293,7 @@ async function main() {
      * in which case we should stop the job and ask for a new one.
      */
     let jobWasCanceled = false;
+    let lateCancellationAfterProcessExit = false;
     let cancelDetectedAtMs: number | null = null;
     let cancelCleanupResult: ProcessGroupCleanupResult | null = null;
     let cancelCleanupPromise: Promise<ProcessGroupCleanupResult> | null = null;
@@ -305,23 +306,46 @@ async function main() {
     };
 
     const onJobCancel = async () => {
-      jobWasCanceled = true;
       cancelDetectedAtMs = Date.now();
       await Promise.all(
         directoryWatchers.map((watcher) => watcher.stopWatching())
       );
       const runningJob = commandExecutor.getRunningJob();
+      const cancelSignalTarget = runningJob ? "process_group" : "none";
       log.info(
         {
           canceled: true,
           cancel_detected_at_ms: cancelDetectedAtMs,
           recreate_after_canceled_job: recreateAfterCanceledJob,
-          cancel_signal_target: runningJob ? "process_group" : "none",
+          cancel_signal_target: cancelSignalTarget,
           cancel_signal_pid: runningJob?.pid,
           cancel_signal_pgid: runningJob?.pgid,
         },
         "remote_cancellation_observed"
       );
+
+      if (!runningJob) {
+        lateCancellationAfterProcessExit = true;
+        cancelCleanupPromise = commandExecutor.stopProcessGroup({
+          reason: "late_remote_cancel_after_process_exit",
+          sequence: cancelStopSequence,
+          logger: log,
+        });
+        cancelCleanupResult = await cancelCleanupPromise;
+        log.info(
+          {
+            canceled: true,
+            cancel_detected_at_ms: cancelDetectedAtMs,
+            cancel_signal_target: cancelSignalTarget,
+            cancel_cleanup_group_empty: cancelCleanupResult.groupEmpty,
+            cancel_cleanup_elapsed_ms: cancelCleanupResult.cleanupElapsedMs,
+          },
+          "late_remote_cancellation_after_process_exit"
+        );
+        return;
+      }
+
+      jobWasCanceled = true;
       stopCancelProgressLogging();
       if (cancelProgressLogIntervalMs > 0) {
         cancelProgressTimer = setInterval(() => {
@@ -753,6 +777,7 @@ async function main() {
         exit_action: observedExitAction,
         error: observedExitError,
         canceled: jobWasCanceled,
+        late_cancellation_after_process_exit: lateCancellationAfterProcessExit,
         cancel_detected_at_ms: cancelDetectedAtMs,
         cancel_to_exit_ms:
           cancelDetectedAtMs === null ? null : jobEndedAtMs - cancelDetectedAtMs,

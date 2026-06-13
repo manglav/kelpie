@@ -197,6 +197,9 @@ export class CommandExecutor {
 
       child.on("exit", (code, signal) => {
         logger.info(`Process exited with code ${code}, signal ${signal}`);
+        if (this.running?.pid === running.pid) {
+          this.running = null;
+        }
         if (code !== null) {
           resolve(code);
         } else {

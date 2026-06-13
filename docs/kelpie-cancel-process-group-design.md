@@ -119,6 +119,64 @@ canceled job.
 | Job exits after `SIGKILL` | Recreate container |
 | Job still appears alive after `SIGKILL` | Recreate container and log `group_empty=false` |
 
+## Late Cancellation After Local Exit
+
+Remote cancellation is asynchronous. At high scale, the scheduler can hand the
+same job to more than one worker and then cancel one attempt after another
+attempt has already won. A worker can therefore observe cancellation after its
+local job process has already exited.
+
+This is common for fast resume/no-op shards:
+
+```text
+worker receives job
+  -> job sees output marker already exists
+  -> job exits 0 quickly
+  -> heartbeat later observes remote status=canceled
+```
+
+This must not be treated the same as canceling a live process. The intended
+semantics are:
+
+```text
+if heartbeat reports canceled and a job process is still running:
+  -> active remote cancellation
+  -> mark jobWasCanceled=true
+  -> signal process group
+  -> emit bounded wait logs while the process group exists
+  -> recreate if KELPIE_RECREATE_AFTER_CANCELED_JOB=true
+
+if heartbeat reports canceled after the local job process already exited:
+  -> late remote cancellation after process exit
+  -> do not mark jobWasCanceled=true
+  -> do not start cancellation wait logs
+  -> do not recreate solely because of this late cancel
+  -> log late_remote_cancellation_after_process_exit
+  -> allow normal completion/reporting path to finish
+```
+
+This distinction matters because the log message
+`Remote cancellation still waiting for process exit` must mean that a live local
+process group is still being waited on. It must not be emitted for already-dead
+processes.
+
+The worker must also clear its running-process state as soon as the child emits
+`exit`. If stale process metadata remains until the end of job bookkeeping, a
+late cancel can be mislabeled as `cancel_signal_target=process_group` even when
+the process group is already empty.
+
+Useful logs for this race:
+
+```text
+remote_cancellation_observed
+late_remote_cancellation_after_process_exit
+job_process_group_cleanup_complete reason=late_remote_cancel_after_process_exit
+kelpie_job_exit late_cancellation_after_process_exit=true
+```
+
+The expected cleanup outcome for a late cancel is `group_empty=true` with no
+signal escalation.
+
 ## Environment Variables
 
 Existing relevant variables:
@@ -162,6 +220,7 @@ remote_cancellation_observed
 job_process_group_signal_sent
 job_process_group_signal_wait
 job_process_group_cleanup_complete
+late_remote_cancellation_after_process_exit
 container_recreate_requested
 work_exited_after_remote_cancellation
 ```
@@ -181,6 +240,7 @@ cleanup_elapsed_ms
 cancel_to_exit_ms
 recreate_after_canceled_job
 recreate_reason
+late_cancellation_after_process_exit
 ```
 
 ## Job Outcome Semantics
@@ -198,6 +258,11 @@ Examples:
 | Yes | signal exit | canceled |
 | No | `0` | completed |
 | No | nonzero | failed |
+
+A late remote cancellation after local process exit is not considered an active
+remote cancellation for local job outcome purposes. The local process has already
+finished, so Kelpie should report/log the normal local outcome and include
+`late_cancellation_after_process_exit=true` for observability.
 
 ## Test Plan
 
@@ -218,6 +283,10 @@ Add tests for:
    requested.
 9. Existing `KELPIE_RECREATE_BETWEEN_JOBS` and
    `KELPIE_RECREATE_EVERY_N_JOBS` behavior remains unchanged for normal jobs.
+10. A cancellation observed after local process exit logs
+    `late_remote_cancellation_after_process_exit`, does not emit active wait
+    logs, does not recreate solely due to the late cancel, and preserves the
+    normal local completion path.
 
 ## Implementation Order
 
