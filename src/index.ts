@@ -3,13 +3,14 @@ import { randomUUID } from "crypto";
 
 import {
   getWork,
-  HeartbeatManager,
+  sendHeartbeat,
   reportFailed,
   reportCompleted,
   reallocateMe,
   recreateMe,
   setDeletionCost,
 } from "./api";
+import { JobHeartbeat } from "./heartbeat";
 import { DirectoryWatcher, purgeDirectory } from "./files";
 import {
   downloadAllFilesFromPrefix,
@@ -123,7 +124,7 @@ async function sleep(ms: number): Promise<void> {
 async function uploadAndCompleteJob(
   work: Task,
   dirToUpload: string,
-  heartbeatManager: HeartbeatManager,
+  heartbeat: JobHeartbeat,
   log: Logger
 ): Promise<void> {
   state.getState().isUploadingFinalArtifacts++;
@@ -143,7 +144,7 @@ async function uploadAndCompleteJob(
     log.error(`Error uploading output directory: ${e.message}`);
     await reportFailed(work.id, log);
     state.getState().isUploadingFinalArtifacts--;
-    await heartbeatManager.stopHeartbeat();
+    await heartbeat.stop();
     return;
   }
 
@@ -153,7 +154,7 @@ async function uploadAndCompleteJob(
   } catch (e: any) {
     log.error(`Error reporting job completion: ${e.message}`);
     state.getState().isUploadingFinalArtifacts--;
-    await heartbeatManager.stopHeartbeat();
+    await heartbeat.stop();
     return;
   }
 
@@ -161,7 +162,7 @@ async function uploadAndCompleteJob(
     `Output directory uploaded and job completed. Removing ${dirToUpload}...`
   );
   await fs.rmdir(dirToUpload, { recursive: true });
-  await heartbeatManager.stopHeartbeat();
+  await heartbeat.stop();
 }
 
 let keepAlive = true;
@@ -283,9 +284,6 @@ async function main() {
       await setDeletionCost(1, log);
     }
 
-    log.info("Starting heartbeat manager...");
-    const heartbeatManager = new HeartbeatManager(work.id, log);
-
     const directoryWatchers: DirectoryWatcher[] = [];
 
     /**
@@ -372,31 +370,19 @@ async function main() {
       cancelCleanupResult = await cancelCleanupPromise;
     };
 
-    const handleHeartbeatError = async (e: any) => {
-      /**
-       * This occurs if a heartbeat fails config.maxRetries times, meaning the machine
-       * has lost communication with kelpie api
-       *  */
-      log.error(`Heartbeat error: ${e.message}`);
-
-      /**
-       * If the heartbeat throws an error, we should restart it.
-       * This is because the error is likely due to a network issue which
-       * may be transient, and the job is still running. This way,
-       * the job can continue to run and the heartbeat will be re-established.
-       *
-       * The alternative is to abort the job or reallocate the instance, but this is
-       * not ideal because the job is still running and may complete successfully.
-       */
-      await heartbeatManager.stopHeartbeat();
-      await heartbeatManager
-        .startHeartbeat(work.heartbeat_interval, onJobCancel)
-        .catch(handleHeartbeatError);
-    };
-
-    heartbeatManager
-      .startHeartbeat(work.heartbeat_interval, onJobCancel)
-      .catch(handleHeartbeatError);
+    log.info("Starting job heartbeat...");
+    const heartbeat = new JobHeartbeat({
+      intervalMs: work.heartbeat_interval * 1000,
+      sendHeartbeat: (signal) => sendHeartbeat(work.id, log, signal),
+      onHeartbeatAccepted: async (numHeartbeats) => {
+        if (state.getState().isUploadingFinalArtifacts === 0) {
+          await setDeletionCost(numHeartbeats + 2, log);
+        }
+      },
+      onCanceled: onJobCancel,
+      log,
+    });
+    heartbeat.start();
 
     /**
      * This block is event-driven, triggered by file changes in configured directories.
@@ -600,7 +586,7 @@ async function main() {
       const exitDecision = decideJobExitAction(exitCode, jobWasCanceled);
       observedExitAction = exitDecision.action;
       if (exitDecision.action === "canceled") {
-        await heartbeatManager.stopHeartbeat();
+        await heartbeat.stop();
         const exitedAtMs = Date.now();
         stopCancelProgressLogging();
         log.info(
@@ -634,7 +620,7 @@ async function main() {
            * Upload and complete and wait for them to complete.
 
            */
-          await uploadAndCompleteJob(work, newDir, heartbeatManager, log);
+          await uploadAndCompleteJob(work, newDir, heartbeat, log);
         } else if (work.sync.after && work.sync.after.length) {
           /**
            * work.sync.after is an array of upload sync blocks.
@@ -693,7 +679,7 @@ async function main() {
                * Only now do we stop the job's heartbeat, because otherwise the job may
                * be handed out again during final upload.
                */
-              await heartbeatManager.stopHeartbeat();
+              await heartbeat.stop();
               await reportCompleted(work.id, log);
             })
             .catch(async (e: any) => {
@@ -704,7 +690,7 @@ async function main() {
               /**
                * Finally, we can clear the directories that were used for the sync.
                */
-              await heartbeatManager.stopHeartbeat();
+              await heartbeat.stop();
               await clearAllDirectories(
                 modifiedOutputs.map((syncConfig) => syncConfig.local_path)
               );
@@ -713,12 +699,12 @@ async function main() {
           /**
            * If there's no IO to process at all, we can just report the job as completed.
            */
-          await heartbeatManager.stopHeartbeat();
+          await heartbeat.stop();
           await reportCompleted(work.id, log);
         }
       } else {
         await reportFailed(work.id, log);
-        await heartbeatManager.stopHeartbeat();
+        await heartbeat.stop();
         log.error(`Work failed with exit code ${exitCode}`);
       }
     } catch (e: any) {
@@ -751,7 +737,7 @@ async function main() {
         await reportFailed(work.id, log);
       }
       stopCancelProgressLogging();
-      await heartbeatManager.stopHeartbeat();
+      await heartbeat.stop();
     }
 
     if (jobWasCanceled && !cancelCleanupResult) {

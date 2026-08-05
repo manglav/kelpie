@@ -104,8 +104,25 @@ async function getHeaders(): Promise<Record<string, string>> {
 
 const imds = new SaladCloudImdsSdk({ baseUrl: imdsUrl });
 
-async function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+async function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  if (!signal) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+  if (signal.aborted) {
+    throw signal.reason;
+  }
+
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      signal.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(signal.reason);
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
 }
 
 async function fetchUpToNTimes<T>(
@@ -117,6 +134,9 @@ async function fetchUpToNTimes<T>(
   let retries = 0;
   while (retries < n) {
     try {
+      if (params.signal?.aborted) {
+        throw params.signal.reason;
+      }
       const response = await fetch(url, params);
       if (response.ok) {
         return response.json() as Promise<T>;
@@ -124,13 +144,16 @@ async function fetchUpToNTimes<T>(
         const body = await response.text();
         log.warn(`Error fetching data, retrying: ${body}`);
         retries++;
-        await sleep(retries * 1000);
+        await sleep(retries * 1000, params.signal);
         continue;
       }
     } catch (err: any) {
+      if (params.signal?.aborted) {
+        throw err;
+      }
       log.warn(`Error fetching data, retrying: ${err.message}`);
       retries++;
-      await sleep(retries * 1000);
+      await sleep(retries * 1000, params.signal);
       continue;
     }
   }
@@ -158,7 +181,8 @@ export async function getWork(): Promise<Task | null> {
 
 export async function sendHeartbeat(
   jobId: string,
-  log: Logger
+  log: Logger,
+  signal?: AbortSignal
 ): Promise<{ status: Task["status"] }> {
   log.debug(`Sending heartbeat`);
   const { status } = await fetchUpToNTimes<{ status: Task["status"] }>(
@@ -166,6 +190,7 @@ export async function sendHeartbeat(
     {
       method: "POST",
       headers: await getHeaders(),
+      signal,
       body: JSON.stringify({
         machine_id: SALAD_MACHINE_ID,
         container_group_id: SALAD_CONTAINER_GROUP_ID,
@@ -232,55 +257,6 @@ export async function reportCompleted(
     maxRetries,
     log
   );
-}
-
-export class HeartbeatManager {
-  private active: boolean = false;
-  private jobId: string;
-  private waiter: Promise<void> | null = null;
-  private log: Logger;
-  private numHeartbeats: number = 0;
-
-  constructor(jobId: string, log: Logger) {
-    this.log = log;
-    this.jobId = jobId;
-  }
-
-  // Starts the heartbeat loop
-  async startHeartbeat(
-    interval_s: number = 30,
-    onCanceled: () => Promise<void>
-  ): Promise<void> {
-    this.active = true; // Set the loop to be active
-    this.log.info("Heartbeat started.");
-
-    while (this.active) {
-      const { status } = await sendHeartbeat(this.jobId, this.log);
-      this.numHeartbeats++;
-      if (status === "canceled") {
-        this.log.info("Job was canceled, stopping heartbeat.");
-        await onCanceled();
-        break;
-      }
-      if (state.getState().isUploadingFinalArtifacts === 0) {
-        await setDeletionCost(this.numHeartbeats + 2, this.log);
-      }
-      this.waiter = sleep(interval_s * 1000);
-      await this.waiter; // Wait for 30 seconds before the next heartbeat
-    }
-
-    this.log.info(`Heartbeat stopped.`);
-  }
-
-  // Stops the heartbeat loop
-  async stopHeartbeat(): Promise<void> {
-    this.log.info("Stopping heartbeat");
-    this.active = false; // Set the loop to be inactive
-    if (this.waiter) {
-      await this.waiter; // Wait for the last heartbeat to complete
-      this.waiter = null;
-    }
-  }
 }
 
 export async function setDeletionCost(
