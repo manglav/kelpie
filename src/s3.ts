@@ -73,7 +73,8 @@ export async function uploadFile(
   bucketName: string,
   key: string,
   compress: boolean = false,
-  log: Logger
+  log: Logger,
+  throwOnError: boolean = false
 ): Promise<void> {
   try {
     if (state.hasUpload(jobId, localFilePath)) {
@@ -132,9 +133,13 @@ export async function uploadFile(
     log.info("Upload completed successfully");
   } catch (err: any) {
     log.error("Error uploading file: ", err);
+    if (throwOnError) {
+      throw err;
+    }
+  } finally {
+    await state.finishUpload(jobId, localFilePath, log);
+    log.debug(state.getJSONState());
   }
-  await state.finishUpload(jobId, localFilePath, log);
-  log.debug(state.getJSONState());
 }
 
 export async function downloadFile(
@@ -382,6 +387,7 @@ export async function uploadDirectory({
   compress = false,
   log,
   pattern,
+  throwOnError = false,
 }: {
   jobId: string;
   directory: string;
@@ -391,6 +397,7 @@ export async function uploadDirectory({
   compress: boolean;
   log: Logger;
   pattern?: RegExp;
+  throwOnError?: boolean;
 }): Promise<void> {
   try {
     log.info(`Uploading directory ${directory} to storage bucket: ${bucket}`);
@@ -406,7 +413,7 @@ export async function uploadDirectory({
     log.info(`Found ${fileList.length} files to upload`);
     for (let i = 0; i < fileList.length; i += batchSize) {
       const batch = fileList.slice(i, i + batchSize);
-      await Promise.all(
+      const results = await Promise.allSettled(
         batch.map(async (filePath) => {
           const localFilePath = path.join(directory, filePath);
           const key = prefix + filePath;
@@ -416,14 +423,25 @@ export async function uploadDirectory({
             bucket,
             key,
             compress,
-            log
+            log,
+            throwOnError
           );
         })
       );
+      const failure = results.find(
+        (result): result is PromiseRejectedResult =>
+          result.status === "rejected"
+      );
+      if (failure) {
+        throw failure.reason;
+      }
     }
     log.info("Directory uploaded successfully");
   } catch (err: any) {
     log.error("Error uploading directory: ", err);
+    if (throwOnError) {
+      throw err;
+    }
   }
 }
 
@@ -491,8 +509,10 @@ export async function uploadSyncConfig(
   jobId: string,
   config: SyncConfig,
   compression: boolean,
-  log: Logger
+  log: Logger,
+  options: { throwOnError?: boolean } = {}
 ) {
+  const { throwOnError = false } = options;
   const { local_path, bucket, prefix, direction, pattern } = config;
   if (direction === "upload") {
     await uploadDirectory({
@@ -504,6 +524,7 @@ export async function uploadSyncConfig(
       compress: compression,
       log,
       pattern: pattern ? new RegExp(pattern) : undefined,
+      throwOnError,
     });
   }
 }

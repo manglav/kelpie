@@ -38,6 +38,11 @@ import {
   parseRecreateEveryNJobs,
 } from "./recreatePolicy";
 import { extractJobMetadata } from "./jobMetadata";
+import {
+  CompletionAckResult,
+  CompletionAckStatus,
+  finalizeSuccessfulJob,
+} from "./completion";
 
 const {
   INPUT_DIR = "/input",
@@ -113,18 +118,28 @@ function workerIdentityFields() {
   };
 }
 
-async function clearAllDirectories(dirsToClear: string[]): Promise<void> {
-  await Promise.all(dirsToClear.map((dir) => purgeDirectory(dir, baseLogger)));
+async function clearAllDirectories(
+  dirsToClear: string[],
+  options: { throwOnError?: boolean } = {}
+): Promise<void> {
+  const results = await Promise.allSettled(
+    dirsToClear.map((dir) => purgeDirectory(dir, baseLogger, options))
+  );
+  const failure = results.find(
+    (result): result is PromiseRejectedResult => result.status === "rejected"
+  );
+  if (failure) {
+    throw failure.reason;
+  }
 }
 
 async function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function uploadAndCompleteJob(
+async function uploadLegacyOutputArtifacts(
   work: Task,
   dirToUpload: string,
-  jobHeartbeat: JobHeartbeat,
   log: Logger
 ): Promise<void> {
   state.getState().isUploadingFinalArtifacts++;
@@ -139,30 +154,25 @@ async function uploadAndCompleteJob(
       batchSize: 2,
       compress: !!work.compression,
       log,
+      throwOnError: true,
     });
-  } catch (e: any) {
-    log.error(`Error uploading output directory: ${e.message}`);
-    await reportFailed(work.id, log);
+  } finally {
     state.getState().isUploadingFinalArtifacts--;
-    await jobHeartbeat.stop();
-    return;
+  }
+}
+
+function completionObservation(result: CompletionAckResult): {
+  action: "completed" | "completion_pending";
+  error: string | null;
+} {
+  if (result.status === CompletionAckStatus.Pending) {
+    return {
+      action: "completion_pending",
+      error: result.completionReportError,
+    };
   }
 
-  try {
-    await reportCompleted(work.id, log);
-    state.getState().isUploadingFinalArtifacts--;
-  } catch (e: any) {
-    log.error(`Error reporting job completion: ${e.message}`);
-    state.getState().isUploadingFinalArtifacts--;
-    await jobHeartbeat.stop();
-    return;
-  }
-
-  log.info(
-    `Output directory uploaded and job completed. Removing ${dirToUpload}...`
-  );
-  await fs.rmdir(dirToUpload, { recursive: true });
-  await jobHeartbeat.stop();
+  return { action: "completed", error: null };
 }
 
 let keepAlive = true;
@@ -266,6 +276,8 @@ async function main() {
       run_name: jobMetadata.run_name,
       shard: jobMetadata.shard,
       screening_worker_start_id: SCREENING_WORKER_START_ID || "unknown",
+      machine_id: SALAD_MACHINE_ID || "unknown",
+      container_group_id: SALAD_CONTAINER_GROUP_ID || "unknown",
     });
     log.info(
       {
@@ -616,91 +628,93 @@ async function main() {
           await fs.rename(OUTPUT_DIR, newDir);
           await fs.mkdir(OUTPUT_DIR, { recursive: true });
 
-          /**
-           * Upload and complete and wait for them to complete.
-
-           */
-          await uploadAndCompleteJob(work, newDir, jobHeartbeat, log);
+          const completionResult = await finalizeSuccessfulJob({
+            uploadFinalArtifacts: async () => {
+              await uploadLegacyOutputArtifacts(work, newDir, log);
+            },
+            stopHeartbeat: () => jobHeartbeat.stop(),
+            reportCompletion: () => reportCompleted(work.id, log),
+            cleanup: async () => {
+              log.info(
+                `Output directory uploaded. Removing ${newDir}...`
+              );
+              await fs.rm(newDir, { recursive: true, force: true });
+            },
+            log,
+          });
+          const observation = completionObservation(completionResult);
+          observedExitAction = observation.action;
+          observedExitError = observation.error;
         } else if (work.sync.after && work.sync.after.length) {
-          /**
-           * work.sync.after is an array of upload sync blocks.
-           */
-          // Move the output directory to a separate location and upload it asynchronously
+          const syncAfter = work.sync.after;
           const modifiedOutputs: SyncConfig[] = [];
-          for (let syncConfig of work.sync.after) {
-            const newDir = `${path.resolve(syncConfig.local_path)}-${work.id}`;
-            log.info(`Moving ${syncConfig.local_path} to ${newDir} for upload`);
-            try {
-              /**
-               * Try moving the folder, because it's faster than copying.
-               */
-              await fs.rename(syncConfig.local_path, newDir);
-            } catch (e: any) {
-              /**
-               * If the move fails, it's likely due to a cross-device link error,
-               * so we should copy the folder instead.
-               */
-              if (e.code && e.code === "EXDEV") {
-                log.warn(
-                  `Cannot move ${syncConfig.local_path} to ${newDir} due to cross-device link, copying instead`
+          const completionResult = await finalizeSuccessfulJob({
+            uploadFinalArtifacts: async () => {
+              for (const syncConfig of syncAfter) {
+                const newDir = `${path.resolve(syncConfig.local_path)}-${work.id}`;
+                log.info(
+                  `Moving ${syncConfig.local_path} to ${newDir} for upload`
                 );
-                await fs.cp(syncConfig.local_path, newDir, { recursive: true });
-                await fs.rm(syncConfig.local_path, { recursive: true });
-              } else {
-                throw e;
+                try {
+                  await fs.rename(syncConfig.local_path, newDir);
+                } catch (e: any) {
+                  if (e.code && e.code === "EXDEV") {
+                    log.warn(
+                      `Cannot move ${syncConfig.local_path} to ${newDir} due to cross-device link, copying instead`
+                    );
+                    await fs.cp(syncConfig.local_path, newDir, {
+                      recursive: true,
+                    });
+                    await fs.rm(syncConfig.local_path, { recursive: true });
+                  } else {
+                    throw e;
+                  }
+                } finally {
+                  await fs.mkdir(syncConfig.local_path, { recursive: true });
+                }
+
+                modifiedOutputs.push({
+                  ...syncConfig,
+                  local_path: newDir,
+                });
+                log.info(
+                  `Moved ${syncConfig.local_path} to ${newDir} for upload`
+                );
               }
-            } finally {
-              await fs.mkdir(syncConfig.local_path, { recursive: true });
-            }
 
-            modifiedOutputs.push({
-              ...syncConfig,
-              local_path: newDir,
-            });
-            log.info(`Moved ${syncConfig.local_path} to ${newDir} for upload`);
-          }
-
-          /**
-           * Upload all sync configs and wait for them to complete.
-           */
-          await Promise.all(
-            modifiedOutputs.map(async (syncConfig) => {
-              await uploadSyncConfig(
-                work.id,
-                syncConfig,
-                !!work.compression,
-                log
+              await Promise.all(
+                modifiedOutputs.map((syncConfig) =>
+                  uploadSyncConfig(
+                    work.id,
+                    syncConfig,
+                    !!work.compression,
+                    log,
+                    { throwOnError: true }
+                  )
+                )
               );
-            })
-          )
-            .then(async () => {
-              /**
-               * Now that all uploads are complete, we can report the job as completed.
-               * Only now do we stop the job's heartbeat, because otherwise the job may
-               * be handed out again during final upload.
-               */
-              await jobHeartbeat.stop();
-              await reportCompleted(work.id, log);
-            })
-            .catch(async (e: any) => {
-              log.error(`Error processing sync config: ${e.message}`);
-              await reportFailed(work.id, log);
-            })
-            .finally(async () => {
-              /**
-               * Finally, we can clear the directories that were used for the sync.
-               */
-              await jobHeartbeat.stop();
-              await clearAllDirectories(
-                modifiedOutputs.map((syncConfig) => syncConfig.local_path)
-              );
-            });
+            },
+            stopHeartbeat: () => jobHeartbeat.stop(),
+            reportCompletion: () => reportCompleted(work.id, log),
+            cleanup: () =>
+              clearAllDirectories(
+                modifiedOutputs.map((syncConfig) => syncConfig.local_path),
+                { throwOnError: true }
+              ),
+            log,
+          });
+          const observation = completionObservation(completionResult);
+          observedExitAction = observation.action;
+          observedExitError = observation.error;
         } else {
-          /**
-           * If there's no IO to process at all, we can just report the job as completed.
-           */
-          await jobHeartbeat.stop();
-          await reportCompleted(work.id, log);
+          const completionResult = await finalizeSuccessfulJob({
+            stopHeartbeat: () => jobHeartbeat.stop(),
+            reportCompletion: () => reportCompleted(work.id, log),
+            log,
+          });
+          const observation = completionObservation(completionResult);
+          observedExitAction = observation.action;
+          observedExitError = observation.error;
         }
       } else {
         await reportFailed(work.id, log);

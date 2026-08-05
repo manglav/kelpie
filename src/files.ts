@@ -272,7 +272,8 @@ export class DirectoryWatcher {
 
 export async function purgeDirectory(
   directory: string,
-  log: Logger
+  log: Logger,
+  options: { throwOnError?: boolean } = {}
 ): Promise<void> {
   try {
     log.info(`Clearing files in directory: ${directory}`);
@@ -281,5 +282,8 @@ export async function purgeDirectory(
     log.info("Directory cleared successfully");
   } catch (err: any) {
     log.error("Error clearing directory: ", err);
+    if (options.throwOnError) {
+      throw err;
+    }
   }
 }
