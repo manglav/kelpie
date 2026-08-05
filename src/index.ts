@@ -124,7 +124,7 @@ async function sleep(ms: number): Promise<void> {
 async function uploadAndCompleteJob(
   work: Task,
   dirToUpload: string,
-  heartbeat: JobHeartbeat,
+  jobHeartbeat: JobHeartbeat,
   log: Logger
 ): Promise<void> {
   state.getState().isUploadingFinalArtifacts++;
@@ -144,7 +144,7 @@ async function uploadAndCompleteJob(
     log.error(`Error uploading output directory: ${e.message}`);
     await reportFailed(work.id, log);
     state.getState().isUploadingFinalArtifacts--;
-    await heartbeat.stop();
+    await jobHeartbeat.stop();
     return;
   }
 
@@ -154,7 +154,7 @@ async function uploadAndCompleteJob(
   } catch (e: any) {
     log.error(`Error reporting job completion: ${e.message}`);
     state.getState().isUploadingFinalArtifacts--;
-    await heartbeat.stop();
+    await jobHeartbeat.stop();
     return;
   }
 
@@ -162,7 +162,7 @@ async function uploadAndCompleteJob(
     `Output directory uploaded and job completed. Removing ${dirToUpload}...`
   );
   await fs.rmdir(dirToUpload, { recursive: true });
-  await heartbeat.stop();
+  await jobHeartbeat.stop();
 }
 
 let keepAlive = true;
@@ -371,7 +371,7 @@ async function main() {
     };
 
     log.info("Starting job heartbeat...");
-    const heartbeat = new JobHeartbeat({
+    const jobHeartbeat = new JobHeartbeat({
       intervalMs: work.heartbeat_interval * 1000,
       sendHeartbeat: (signal) => sendHeartbeat(work.id, log, signal),
       onHeartbeatAccepted: async (numHeartbeats) => {
@@ -382,7 +382,7 @@ async function main() {
       onCanceled: onJobCancel,
       log,
     });
-    heartbeat.start();
+    jobHeartbeat.start();
 
     /**
      * This block is event-driven, triggered by file changes in configured directories.
@@ -586,7 +586,7 @@ async function main() {
       const exitDecision = decideJobExitAction(exitCode, jobWasCanceled);
       observedExitAction = exitDecision.action;
       if (exitDecision.action === "canceled") {
-        await heartbeat.stop();
+        await jobHeartbeat.stop();
         const exitedAtMs = Date.now();
         stopCancelProgressLogging();
         log.info(
@@ -620,7 +620,7 @@ async function main() {
            * Upload and complete and wait for them to complete.
 
            */
-          await uploadAndCompleteJob(work, newDir, heartbeat, log);
+          await uploadAndCompleteJob(work, newDir, jobHeartbeat, log);
         } else if (work.sync.after && work.sync.after.length) {
           /**
            * work.sync.after is an array of upload sync blocks.
@@ -679,7 +679,7 @@ async function main() {
                * Only now do we stop the job's heartbeat, because otherwise the job may
                * be handed out again during final upload.
                */
-              await heartbeat.stop();
+              await jobHeartbeat.stop();
               await reportCompleted(work.id, log);
             })
             .catch(async (e: any) => {
@@ -690,7 +690,7 @@ async function main() {
               /**
                * Finally, we can clear the directories that were used for the sync.
                */
-              await heartbeat.stop();
+              await jobHeartbeat.stop();
               await clearAllDirectories(
                 modifiedOutputs.map((syncConfig) => syncConfig.local_path)
               );
@@ -699,12 +699,12 @@ async function main() {
           /**
            * If there's no IO to process at all, we can just report the job as completed.
            */
-          await heartbeat.stop();
+          await jobHeartbeat.stop();
           await reportCompleted(work.id, log);
         }
       } else {
         await reportFailed(work.id, log);
-        await heartbeat.stop();
+        await jobHeartbeat.stop();
         log.error(`Work failed with exit code ${exitCode}`);
       }
     } catch (e: any) {
@@ -737,7 +737,7 @@ async function main() {
         await reportFailed(work.id, log);
       }
       stopCancelProgressLogging();
-      await heartbeat.stop();
+      await jobHeartbeat.stop();
     }
 
     if (jobWasCanceled && !cancelCleanupResult) {

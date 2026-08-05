@@ -12,7 +12,12 @@ export type JobHeartbeatOptions = {
   log: Logger;
 };
 
-type HeartbeatState = "idle" | "running" | "stopping" | "stopped";
+enum JobHeartbeatState {
+  Idle = "idle",
+  Running = "running",
+  Stopping = "stopping",
+  Stopped = "stopped",
+}
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -20,7 +25,7 @@ function errorMessage(error: unknown): string {
 
 /** Owns the single heartbeat loop for one job attempt. */
 export class JobHeartbeat {
-  private state: HeartbeatState = "idle";
+  private state = JobHeartbeatState.Idle;
   private loopPromise: Promise<void> | null = null;
   private wakeInterval: (() => void) | null = null;
   private numHeartbeats = 0;
@@ -29,22 +34,22 @@ export class JobHeartbeat {
   constructor(private readonly options: JobHeartbeatOptions) {}
 
   start(): void {
-    if (this.state !== "idle") {
+    if (this.state !== JobHeartbeatState.Idle) {
       throw new Error(`Cannot start heartbeat from ${this.state} state`);
     }
 
-    this.state = "running";
+    this.state = JobHeartbeatState.Running;
     this.loopPromise = this.run();
   }
 
   async stop(): Promise<void> {
-    if (this.state === "idle") {
-      this.state = "stopped";
+    if (this.state === JobHeartbeatState.Idle) {
+      this.state = JobHeartbeatState.Stopped;
       return;
     }
 
-    if (this.state === "running") {
-      this.state = "stopping";
+    if (this.state === JobHeartbeatState.Running) {
+      this.state = JobHeartbeatState.Stopping;
       this.abortController.abort();
       this.interruptInterval();
     }
@@ -53,7 +58,7 @@ export class JobHeartbeat {
   }
 
   private isRunning(): boolean {
-    return this.state === "running";
+    return this.state === JobHeartbeatState.Running;
   }
 
   private async run(): Promise<void> {
@@ -82,7 +87,7 @@ export class JobHeartbeat {
 
         this.numHeartbeats++;
         if (response.status === "canceled") {
-          this.state = "stopping";
+          this.state = JobHeartbeatState.Stopping;
           this.options.log.info("Job was canceled, stopping heartbeat.");
           try {
             await this.options.onCanceled();
@@ -108,7 +113,7 @@ export class JobHeartbeat {
       }
     } finally {
       this.interruptInterval();
-      this.state = "stopped";
+      this.state = JobHeartbeatState.Stopped;
       this.options.log.info("Heartbeat stopped.");
     }
   }
