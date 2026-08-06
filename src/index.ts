@@ -43,6 +43,10 @@ import {
   CompletionAckStatus,
   finalizeSuccessfulJob,
 } from "./completion";
+import {
+  decideWorkerRecovery,
+  WorkerRecoveryAction,
+} from "./workerHealth";
 
 const {
   INPUT_DIR = "/input",
@@ -270,6 +274,9 @@ async function main() {
     let observedExitCode: number | null = null;
     let observedExitAction: string | null = null;
     let observedExitError: string | null = null;
+    let failureAckStatus: "not_applicable" | "acknowledged" | "pending" =
+      "not_applicable";
+    let failureAckError: string | null = null;
     const log = baseLogger.child({
       job_id: work.id,
       kelpie_job_attempt_id: jobAttemptId,
@@ -717,8 +724,27 @@ async function main() {
           observedExitError = observation.error;
         }
       } else {
-        await reportFailed(work.id, log);
         await jobHeartbeat.stop();
+        const recoveryDecision = decideWorkerRecovery(exitCode, false);
+        try {
+          await reportFailed(work.id, log, {
+            suppressThresholdReallocation:
+              recoveryDecision.action === WorkerRecoveryAction.Reallocate,
+          });
+          failureAckStatus = "acknowledged";
+        } catch (error: unknown) {
+          failureAckStatus = "pending";
+          failureAckError =
+            error instanceof Error ? error.message : String(error);
+          log.error(
+            {
+              failure_ack_status: failureAckStatus,
+              failure_ack_error: failureAckError,
+              report_failure: true,
+            },
+            "failure_ack_pending"
+          );
+        }
         log.error(`Work failed with exit code ${exitCode}`);
       }
     } catch (e: any) {
@@ -764,6 +790,10 @@ async function main() {
     }
 
     const jobEndedAtMs = Date.now();
+    const workerRecovery = decideWorkerRecovery(
+      observedExitCode,
+      jobWasCanceled
+    );
     log.info(
       {
         ...jobMetadata,
@@ -776,6 +806,11 @@ async function main() {
         exit_code: observedExitCode,
         exit_action: observedExitAction,
         error: observedExitError,
+        failure_ack_status: failureAckStatus,
+        failure_ack_error: failureAckError,
+        worker_health_signal: workerRecovery.signal,
+        recovery_action: workerRecovery.action,
+        recovery_reason: workerRecovery.reason,
         canceled: jobWasCanceled,
         late_cancellation_after_process_exit: lateCancellationAfterProcessExit,
         cancel_detected_at_ms: cancelDetectedAtMs,
@@ -787,6 +822,14 @@ async function main() {
       },
       "kelpie_job_exit"
     );
+
+    if (workerRecovery.action === WorkerRecoveryAction.Reallocate) {
+      await reallocateMe(
+        `Kelpie: worker unhealthy (${workerRecovery.reason})`,
+        log
+      );
+      break;
+    }
 
     /**
      * While the previous job is being finalized from temporary directories,

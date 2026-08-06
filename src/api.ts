@@ -203,7 +203,11 @@ export async function sendHeartbeat(
 }
 
 let numFailures = 0;
-export async function reportFailed(jobId: string, log: Logger): Promise<void> {
+export async function reportFailed(
+  jobId: string,
+  log: Logger,
+  options: { suppressThresholdReallocation?: boolean } = {}
+): Promise<void> {
   log.info(`Reporting job failed`);
   state.finishJob(jobId, "failed", log);
   await fetchUpToNTimes(
@@ -220,7 +224,10 @@ export async function reportFailed(jobId: string, log: Logger): Promise<void> {
     log
   );
   numFailures++;
-  if (numFailures >= maxJobFailures) {
+  if (
+    numFailures >= maxJobFailures &&
+    !options.suppressThresholdReallocation
+  ) {
     await reallocateMe("Kelpie: Max Job Failures Exceeded", log);
   }
 }
