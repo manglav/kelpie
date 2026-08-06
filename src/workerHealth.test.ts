@@ -8,12 +8,12 @@ import {
   WorkerRecoveryAction,
 } from "./workerHealth";
 
-test("worker-unhealthy exit requests reallocation", () => {
+test("worker-unhealthy exit requests recreation", () => {
   assert.deepEqual(
     decideWorkerRecovery(WorkerProcessExitCode.Unhealthy, false),
     {
       signal: WorkerHealthSignal.UnhealthyExit,
-      action: WorkerRecoveryAction.Reallocate,
+      action: WorkerRecoveryAction.Recreate,
       reason: "job_exit_75",
     }
   );

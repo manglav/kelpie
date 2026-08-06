@@ -729,7 +729,7 @@ async function main() {
         try {
           await reportFailed(work.id, log, {
             suppressThresholdReallocation:
-              recoveryDecision.action === WorkerRecoveryAction.Reallocate,
+              recoveryDecision.action === WorkerRecoveryAction.Recreate,
           });
           failureAckStatus = "acknowledged";
         } catch (error: unknown) {
@@ -823,11 +823,8 @@ async function main() {
       "kelpie_job_exit"
     );
 
-    if (workerRecovery.action === WorkerRecoveryAction.Reallocate) {
-      await reallocateMe(
-        `Kelpie: worker unhealthy (${workerRecovery.reason})`,
-        log
-      );
+    if (workerRecovery.action === WorkerRecoveryAction.Recreate) {
+      await recreateMe(log);
       break;
     }
 

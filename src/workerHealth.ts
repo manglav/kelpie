@@ -9,7 +9,7 @@ export enum WorkerHealthSignal {
 
 export enum WorkerRecoveryAction {
   None = "none",
-  Reallocate = "reallocate",
+  Recreate = "recreate",
 }
 
 export type WorkerRecoveryDecision = {
@@ -25,7 +25,7 @@ export function decideWorkerRecovery(
   if (!jobWasCanceled && exitCode === WorkerProcessExitCode.Unhealthy) {
     return {
       signal: WorkerHealthSignal.UnhealthyExit,
-      action: WorkerRecoveryAction.Reallocate,
+      action: WorkerRecoveryAction.Recreate,
       reason: "job_exit_75",
     };
   }

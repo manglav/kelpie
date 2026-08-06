@@ -181,15 +181,15 @@ async function exerciseUnhealthyExit(failFailureAck: boolean): Promise<{
 
 for (const failFailureAck of [false, true]) {
   test(
-    `worker-unhealthy exit reallocates once when failure acknowledgement ${
+    `worker-unhealthy exit recreates once when failure acknowledgement ${
       failFailureAck ? "fails" : "succeeds"
     }`,
     async () => {
       const result = await exerciseUnhealthyExit(failFailureAck);
       assert.equal(result.completedCount, 0);
       assert.equal(result.failedCount, 1);
-      assert.equal(result.recreateCount, 0);
-      assert.equal(result.reallocateCount, 1);
+      assert.equal(result.recreateCount, 1);
+      assert.equal(result.reallocateCount, 0);
 
       const events = result.stdout
         .trim()
@@ -203,7 +203,7 @@ for (const failFailureAck of [false, true]) {
         terminal.worker_health_signal,
         WorkerHealthSignal.UnhealthyExit
       );
-      assert.equal(terminal.recovery_action, WorkerRecoveryAction.Reallocate);
+      assert.equal(terminal.recovery_action, WorkerRecoveryAction.Recreate);
       assert.equal(terminal.recovery_reason, "job_exit_75");
       assert.equal(
         terminal.failure_ack_status,
