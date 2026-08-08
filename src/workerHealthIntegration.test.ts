@@ -137,6 +137,7 @@ async function exerciseUnhealthyExit(failFailureAck: boolean): Promise<{
         SALAD_MACHINE_ID: "machine-health-1",
         SALAD_CONTAINER_GROUP_ID: "group-health-1",
         SCREENING_WORKER_START_ID: "worker-start-health-1",
+        KELPIE_JOB_HEARTBEAT_INTERVAL_S: "0.05",
         MAX_JOB_FAILURES: "1",
         MAX_RETRIES: "1",
         MAX_TIME_WITH_NO_WORK_S: "0",

@@ -4,6 +4,7 @@ import { Logger } from "pino";
 import { Task } from "./types";
 import { SaladCloudImdsSdk } from "@saladtechnologies-oss/salad-cloud-imds-sdk";
 import state from "./state";
+import { controlPlaneConfig, retryDelayMs } from "./controlPlaneConfig";
 
 let {
   KELPIE_API_URL = "https://kelpie.saladexamples.com",
@@ -16,7 +17,6 @@ let {
   SALAD_MACHINE_ID = "",
   SALAD_CONTAINER_GROUP_ID = "",
   SALAD_IMDS_URL = "http://169.254.169.254",
-  MAX_RETRIES = "3",
   MAX_JOB_FAILURES = "5",
 } = process.env;
 
@@ -42,7 +42,6 @@ if (
   );
 }
 
-const maxRetries = parseInt(MAX_RETRIES, 10);
 const maxJobFailures = parseInt(MAX_JOB_FAILURES, 10);
 const MAX_TOKEN_FAILURES = 5;
 let tokenFailures = 0;
@@ -125,36 +124,106 @@ async function sleep(ms: number, signal?: AbortSignal): Promise<void> {
   });
 }
 
-async function fetchUpToNTimes<T>(
+function createAttemptSignal(
+  lifecycleSignal: AbortSignal | undefined,
+  timeoutMs: number
+): { signal: AbortSignal; cleanup: () => void } {
+  const controller = new AbortController();
+  const onLifecycleAbort = () => controller.abort(lifecycleSignal?.reason);
+
+  if (lifecycleSignal?.aborted) {
+    controller.abort(lifecycleSignal.reason);
+  } else {
+    lifecycleSignal?.addEventListener("abort", onLifecycleAbort, {
+      once: true,
+    });
+  }
+
+  const timeout = setTimeout(() => {
+    controller.abort(
+      new Error(`Kelpie API request timed out after ${timeoutMs}ms`)
+    );
+  }, timeoutMs);
+
+  return {
+    signal: controller.signal,
+    cleanup: () => {
+      clearTimeout(timeout);
+      lifecycleSignal?.removeEventListener("abort", onLifecycleAbort);
+    },
+  };
+}
+
+export async function fetchUpToNTimes<T>(
   url: string,
-  params: any,
+  params: RequestInit,
   n: number,
   log: Logger = baseLogger
 ): Promise<T> {
-  let retries = 0;
-  while (retries < n) {
+  let attempts = 0;
+  while (attempts < n) {
+    attempts++;
+    const lifecycleSignal = params.signal as AbortSignal | undefined;
+    const attempt = createAttemptSignal(
+      lifecycleSignal,
+      controlPlaneConfig.apiRequestTimeoutMs
+    );
+    let delayBeforeNextAttemptMs: number | null = null;
     try {
-      if (params.signal?.aborted) {
-        throw params.signal.reason;
+      if (lifecycleSignal?.aborted) {
+        throw lifecycleSignal.reason;
       }
-      const response = await fetch(url, params);
+      const response = await fetch(url, {
+        ...params,
+        signal: attempt.signal,
+      });
       if (response.ok) {
-        return response.json() as Promise<T>;
-      } else {
-        const body = await response.text();
-        log.warn(`Error fetching data, retrying: ${body}`);
-        retries++;
-        await sleep(retries * 1000, params.signal);
-        continue;
+        return (await response.json()) as T;
       }
+
+      const body = await response.text();
+      const willRetry = attempts < n;
+      delayBeforeNextAttemptMs = willRetry
+        ? retryDelayMs(attempts, controlPlaneConfig)
+        : null;
+      log.warn(
+        {
+          api_path: new URL(url).pathname,
+          attempt: attempts,
+          max_attempts: n,
+          http_status: response.status,
+          response_body: body.slice(0, 1000),
+          retry_delay_ms: delayBeforeNextAttemptMs,
+        },
+        willRetry
+          ? "Kelpie API request failed; retrying"
+          : "Kelpie API request failed; attempts exhausted"
+      );
     } catch (err: any) {
-      if (params.signal?.aborted) {
+      if (lifecycleSignal?.aborted) {
         throw err;
       }
-      log.warn(`Error fetching data, retrying: ${err.message}`);
-      retries++;
-      await sleep(retries * 1000, params.signal);
-      continue;
+      const willRetry = attempts < n;
+      delayBeforeNextAttemptMs = willRetry
+        ? retryDelayMs(attempts, controlPlaneConfig)
+        : null;
+      log.warn(
+        {
+          api_path: new URL(url).pathname,
+          attempt: attempts,
+          max_attempts: n,
+          error: err?.message ?? String(err),
+          retry_delay_ms: delayBeforeNextAttemptMs,
+        },
+        willRetry
+          ? "Kelpie API request failed; retrying"
+          : "Kelpie API request failed; attempts exhausted"
+      );
+    } finally {
+      attempt.cleanup();
+    }
+    if (delayBeforeNextAttemptMs !== null) {
+      await sleep(delayBeforeNextAttemptMs, lifecycleSignal);
     }
   }
   throw new Error(`Failed to fetch data: ${url}`);
@@ -171,7 +240,7 @@ export async function getWork(): Promise<Task | null> {
       method: "GET",
       headers: await getHeaders(),
     },
-    maxRetries
+    controlPlaneConfig.maxAttempts
   );
   if (work.length) {
     return work[0];
@@ -196,7 +265,7 @@ export async function sendHeartbeat(
         container_group_id: SALAD_CONTAINER_GROUP_ID,
       }),
     },
-    maxRetries,
+    controlPlaneConfig.maxAttempts,
     log
   );
   return { status };
@@ -220,7 +289,7 @@ export async function reportFailed(
         container_group_id: SALAD_CONTAINER_GROUP_ID,
       }),
     },
-    maxRetries,
+    controlPlaneConfig.maxAttempts,
     log
   );
   numFailures++;
@@ -261,7 +330,7 @@ export async function reportCompleted(
         container_group_id: SALAD_CONTAINER_GROUP_ID,
       }),
     },
-    maxRetries,
+    controlPlaneConfig.maxAttempts,
     log
   );
 }
@@ -310,7 +379,7 @@ async function getSaladJWT(
           Metadata: "true",
         },
       },
-      3,
+      controlPlaneConfig.maxAttempts,
       log
     );
     tokenFailures = 0;

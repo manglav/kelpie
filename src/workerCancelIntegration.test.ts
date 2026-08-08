@@ -219,6 +219,7 @@ test(
           SCREENING_WORKER_START_ID: "worker-start-test-1",
           SALAD_MACHINE_ID: "machine-test-1",
           SALAD_CONTAINER_GROUP_ID: "group-test-1",
+          KELPIE_JOB_HEARTBEAT_INTERVAL_S: "0.05",
           MAX_TIME_WITH_NO_WORK_S: "0",
         },
       });
@@ -394,6 +395,7 @@ test(
           SCREENING_WORKER_START_ID: "worker-start-late-cancel-test",
           SALAD_MACHINE_ID: "machine-test-late-cancel",
           SALAD_CONTAINER_GROUP_ID: "group-test-late-cancel",
+          KELPIE_JOB_HEARTBEAT_INTERVAL_S: "0.05",
           HEARTBEAT_INTERVAL_S: "1",
           MAX_TIME_WITH_NO_WORK_S: "1",
         },

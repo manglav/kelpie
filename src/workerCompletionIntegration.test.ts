@@ -43,6 +43,7 @@ async function runWorker({
       KELPIE_RECREATE_EVERY_N_JOBS: String(recreateEveryNJobs),
       SALAD_MACHINE_ID: machineId,
       SALAD_CONTAINER_GROUP_ID: containerGroupId,
+      KELPIE_JOB_HEARTBEAT_INTERVAL_S: "0.05",
       MAX_RETRIES: "1",
       MAX_TIME_WITH_NO_WORK_S: "0",
     },

@@ -47,6 +47,7 @@ import {
   decideWorkerRecovery,
   WorkerRecoveryAction,
 } from "./workerHealth";
+import { controlPlaneConfig } from "./controlPlaneConfig";
 
 const {
   INPUT_DIR = "/input",
@@ -55,9 +56,6 @@ const {
 
   // Default to 0, which means no timeout
   MAX_TIME_WITH_NO_WORK_S = "0",
-
-  // There are backend implications to this, so we aren't documenting it yet.
-  HEARTBEAT_INTERVAL_S = "10",
 
   KELPIE_CANCEL_PROGRESS_LOG_INTERVAL_S = "10",
   KELPIE_CANCEL_SIGINT_GRACE_S = "15",
@@ -77,7 +75,6 @@ mkdirSync(OUTPUT_DIR, { recursive: true });
 mkdirSync(CHECKPOINT_DIR, { recursive: true });
 
 const maxTimeWithNoWorkMs = parseInt(MAX_TIME_WITH_NO_WORK_S, 10) * 1000;
-const heartbeatIntervalMs = parseInt(HEARTBEAT_INTERVAL_S, 10) * 1000;
 const cancelProgressLogIntervalMs =
   parseInt(KELPIE_CANCEL_PROGRESS_LOG_INTERVAL_S, 10) * 1000;
 const recreateBetweenJobs = KELPIE_RECREATE_BETWEEN_JOBS === "true";
@@ -195,6 +192,19 @@ const filesBeingSynced = new Set();
 
 async function main() {
   baseLogger.info(`Kelpie v${version} started`);
+  baseLogger.info(
+    {
+      api_request_timeout_s: controlPlaneConfig.apiRequestTimeoutMs / 1000,
+      api_max_attempts: controlPlaneConfig.maxAttempts,
+      api_retry_initial_delay_s:
+        controlPlaneConfig.apiRetryInitialDelayMs / 1000,
+      api_retry_max_delay_s: controlPlaneConfig.apiRetryMaxDelayMs / 1000,
+      work_poll_interval_s: controlPlaneConfig.workPollIntervalMs / 1000,
+      job_heartbeat_interval_s:
+        controlPlaneConfig.jobHeartbeatIntervalMs / 1000,
+    },
+    "kelpie_control_plane_config"
+  );
   await state.saveState(baseLogger);
   await clearAllDirectories(
     Array.from(new Set([INPUT_DIR, OUTPUT_DIR, CHECKPOINT_DIR]))
@@ -208,7 +218,7 @@ async function main() {
       work = await getWork();
     } catch (e: any) {
       baseLogger.error("Error fetching work: ", e);
-      await sleep(heartbeatIntervalMs);
+      await sleep(controlPlaneConfig.workPollIntervalMs);
       continue;
     }
 
@@ -259,12 +269,16 @@ async function main() {
         );
         break;
       }
-      baseLogger.info("No work available, sleeping for 10 seconds...");
+      baseLogger.info(
+        `No work available, sleeping for ${
+          controlPlaneConfig.workPollIntervalMs / 1000
+        } seconds...`
+      );
       if (state.getState().isUploadingFinalArtifacts === 0) {
         // If no uploads are in progress, we can reset the deletion cost
         await setDeletionCost(0, baseLogger);
       }
-      await sleep(heartbeatIntervalMs);
+      await sleep(controlPlaneConfig.workPollIntervalMs);
       continue;
     }
     lastWorkReceived = Date.now();
@@ -294,6 +308,8 @@ async function main() {
         task_container_group_id: work.container_group_id,
         job_started_at_ms: jobStartedAtMs,
         heartbeat_interval_s: work.heartbeat_interval,
+        worker_heartbeat_interval_s:
+          controlPlaneConfig.jobHeartbeatIntervalMs / 1000,
         max_failures: work.max_failures,
       },
       "kelpie_job_received"
@@ -391,7 +407,7 @@ async function main() {
 
     log.info("Starting job heartbeat...");
     const jobHeartbeat = new JobHeartbeat({
-      intervalMs: work.heartbeat_interval * 1000,
+      intervalMs: controlPlaneConfig.jobHeartbeatIntervalMs,
       sendHeartbeat: (signal) => sendHeartbeat(work.id, log, signal),
       onHeartbeatAccepted: async (numHeartbeats) => {
         if (state.getState().isUploadingFinalArtifacts === 0) {

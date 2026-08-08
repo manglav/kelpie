@@ -155,6 +155,7 @@ test("late heartbeat failure cannot restart after the child exits", async () => 
         KELPIE_RECREATE_EVERY_N_JOBS: "0",
         SALAD_MACHINE_ID: "machine-heartbeat-test",
         SALAD_CONTAINER_GROUP_ID: "group-heartbeat-test",
+        KELPIE_JOB_HEARTBEAT_INTERVAL_S: "0.05",
         MAX_RETRIES: "1",
         MAX_TIME_WITH_NO_WORK_S: "0",
       },
